@@ -11,12 +11,18 @@ import sqlite3
 import lxml.html as lhtml
 from time import time
 import sys
+import aiosqlite
 sys.path.append('C:/Users/Davis/Ai_Thing') 
 
 
 nlp = spacy.load('en_core_web_sm')
 db_filename = "language_data.db"
 DATABASE_NAME = 'language_data.sql'
+
+async def create_connection_pool():
+    return await aiosqlite.connect(db_filename)
+
+conn = asyncio.run(create_connection_pool())
 
 conn = None
 cursor = None
@@ -376,23 +382,7 @@ def insert_or_update_word(conn, word_data):
     conn.commit()
 
 
-def add_new_words_to_database(all_word_data):
-    start_time = time()  # Call the time() function directly
-    with connect_to_database() as conn:
-        cursor = conn.cursor()
-        filename = "data/language/new_words.json"
-        with open(filename, 'r') as f:
-            new_words = json.load(f)
-
-        for word in new_words:
-            data = all_word_data.get(word)
-            insert_or_update_word(conn, data)
-            print(f"Added/updated word: {word}")
-
-    end_time = time()  # Call the time() function directly
-    print(f"Finished adding new words in {end_time - start_time:.2f} seconds")
-
-async def fetch_definition(session, word, url_func):
+async def fetch_definition(session, word, url_func, conn):
     try:
         async with session.get(url_func(word)) as response:
             if response.status == 200:
@@ -422,44 +412,58 @@ async def get_definitions_concurrently(words):
             definitions[word] = def1 or def2  
             return definitions
 
+async def insert_or_update_word_async(conn, word_data):
+    word = word_data['word']
+    part_of_speech = get_part_of_speech(conn, word)
+    table_name = part_of_speech.lower() + "s"
+
+    cursor = conn.cursor()  
+    cursor.execute(
+        f"SELECT definition FROM words WHERE word = ?", (word,)
+    )
+    existing_definition = cursor.fetchone()
+
+def add_new_words_to_database(all_word_data):  
+    start_time = time()
+    with connect_to_database() as conn:
+        cursor = conn.cursor()
+        filename = "data/language/new_words.json"
+        with open(filename, 'r') as f:
+            new_words = json.load(f)
+
+        for word in new_words:
+            data = all_word_data.get(word)
+            insert_or_update_word(conn, data)
+            print(f"Added/updated word: {word}")
+
+    end_time = time()
+    print(f"Finished adding new words in {end_time - start_time:.2f} seconds")
+
 async def process_file(filename, all_word_data):
-    for insert_or_update_word_async in all_word_data:
-        tasks = [] 
-    with open(os.path.join('data/language', filename), 'r') as f:
-        data = json.load(f)
-        for word, word_info in data.items():
-            if not word_exists_in_database(conn, word):
-                tasks.append(
-                    asyncio.create_task(insert_or_update_word_async(conn, {"word": word, "definition": word_info.get("definition")}))
-                )
-    await asyncio.gather(*tasks) 
+    async with conn.execute("begin"):  # Open transaction
+        tasks = []
+        with open(os.path.join('data/language', filename), 'r') as f:
+            data = json.load(f)
+            for word, word_info in data.items():
+                if not await word_exists_in_database(conn, word):  # Now it has access to conn
+                    tasks.append(
+                        asyncio.create_task(insert_or_update_word_async(conn, {"word": word, "definition": word_info.get("definition")}))
+                    )
+        await asyncio.gather(*tasks)  
 
-async def add_other_json_files():
-    global all_word_data
 
+async def add_other_json_files(all_word_data):
     tasks = []
-    for filename in os.listdir('data/language'):
+    for filename in os.listdir("data/language"):
         if filename.endswith(".json") and filename != "new_words.json":
-            tasks.append(asyncio.create_task(process_file(filename, all_word_data)))
-    await asyncio.gather(*tasks)
+            tasks.append(
+                asyncio.create_task(process_file(filename, all_word_data, conn))
+            )
+    await asyncio.gather(*tasks)  # Wait for tasks to complete
     conn.commit()
 
-
-if __name__ == "__main__":
-    create_tables()
-
-    start_time = time()
-    new_words, all_word_data = get_new_words_from_json()
-    end_time = time()
-    print(f"Loaded {len(new_words)} new words from JSON in {end_time - start_time:.2f} seconds")
-
-    add_new_words_to_database()
-    asyncio.run(add_other_json_files())  # Run asynchronously
-    conn.close() # Close the database when finished
-    print("All done! Database populated successfully.")
-
 def add_other_json_files(all_word_data):
-    batch_size = 100  # You can adjust the batch size as needed
+    batch_size = 100  
     words_to_insert = []
 
     for filename in os.listdir('data/language'):
@@ -524,6 +528,11 @@ def get_definition_website2(word):
 
     except (IndexError, AttributeError):
         return None
+
+async def word_exists_in_database(conn, word):
+    async with conn.execute("SELECT EXISTS(SELECT 1 FROM words WHERE word = ?)", (word,)) as cursor:
+        result = await cursor.fetchone()
+        return bool(result[0])
 
 def add_definition(word, definition):
     connect_to_database()
