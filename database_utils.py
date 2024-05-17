@@ -100,15 +100,15 @@ def create_tables():
   conn.commit()
 
 def get_part_of_speech(conn, word):
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
-        result = cursor.fetchone()
+    cursor = conn.cursor() 
+    cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
+    result = cursor.fetchone()
 
     if result:
-        return result[0]  # Return the POS directly
+        return result[0]  
     else:
         doc = nlp(word)
-        return doc[0].pos_  # Return the POS from spaCy
+        return doc[0].pos_ 
 
 def get_new_words_from_json():
     new_words = set()
@@ -324,15 +324,15 @@ def insert_word(word, lemma, ipa, pos="ADJECTIVE"):
     conn.commit()
 
 def insert_or_update_word(conn, word_data):
-    with conn.cursor() as cursor:
-        word = word_data['word']
-        part_of_speech = get_part_of_speech(conn, word) # Retrieve POS before using it
-        table_name = part_of_speech.lower() + "s"
+    word = word_data['word']
+    part_of_speech = get_part_of_speech(conn, word)  # Pass conn to get_part_of_speech
+    table_name = part_of_speech.lower() + "s"
 
-        cursor.execute(
-            f"SELECT definition FROM {table_name} WHERE word = ?", (word,)
-        )
-        existing_definition = cursor.fetchone()
+    cursor = conn.cursor() 
+    cursor.execute(
+        f"SELECT definition FROM {table_name} WHERE word = ?", (word,)
+    )
+    existing_definition = cursor.fetchone()
 
     if existing_definition and existing_definition[0] is not None:
         pass
