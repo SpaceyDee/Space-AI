@@ -217,7 +217,7 @@ def connect_to_database():
 
 def word_exists_in_database(conn, word): 
     cursor = conn.cursor()
-    cursor.execute("SELECT EXISTS(SELECT 1 FROM words WHERE word = %s)", (word,))
+    cursor.execute("SELECT EXISTS(SELECT 1 FROM words WHERE word = ?)", (word,))
     result = cursor.fetchone()
     return bool(result[0])
 
