@@ -7,31 +7,13 @@ import json
 import pyphen
 import sqlite3
 import lxml.html as lhtml
-import mysql.connector
 
 nlp = spacy.load('en_core_web_sm')
+db_filename = "language_data.db"
 DATABASE_NAME = 'language_data.sql'
 
 conn = None
 cursor = None
-
-def initialize_database(database_file):
-    print(f"Initializing database from file: {database_file}") 
-    if not os.path.exists(database_file):
-        print(f"Database file not found at: {database_file}") 
-        try:
-            with open(database_file, "r") as f:
-                sql = f.read()
-            conn = mysql.connector.connect(
-                host="127.0.0.1",
-                user="root", 
-                password="PASSWORD"
-            )
-            cursor = conn.cursor()
-            cursor.execute(sql, multi=True)  
-            conn.commit()
-        except Exception as e:
-            print(f"Error initializing database: {e}")
 
 def get_new_words_from_json():
     new_words = set()
@@ -58,6 +40,88 @@ def get_new_words_from_json():
                         }
                         all_word_data[word] = word_data
     return new_words, all_word_data
+
+def create_tables():
+  with connect_to_database() as conn:
+    cursor = conn.cursor()
+    cursor.executescript(
+      '''
+      CREATE TABLE IF NOT EXISTS words (
+        word_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        word TEXT UNIQUE,
+        lemma TEXT,
+        ipa TEXT,
+        pos TEXT,
+        definition TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS parts_of_speech(
+        pos_id INT AUTO_INCREMENT PRIMARY KEY,
+        pos_type TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS word_pos(
+        word_id INT,
+        pos_id INT,
+        PRIMARY KEY(word_id, pos_id),
+        FOREIGN KEY(word_id) REFERENCES words(word_id),
+        FOREIGN KEY(pos_id) REFERENCES parts_of_speech(pos_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS synonyms(
+        synonym_id INT AUTO_INCREMENT PRIMARY KEY,
+        word_id INT,
+        synonym_word_id INT,
+        FOREIGN KEY(word_id) REFERENCES words(word_id),
+        FOREIGN KEY(synonym_word_id) REFERENCES words(word_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS definitions (
+        definition_id INT AUTO_INCREMENT PRIMARY KEY,
+        word_id INT,
+        definition TEXT,
+        example_usage TEXT,
+        FOREIGN KEY(word_id) REFERENCES words(word_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS antonyms (
+        antonym_id INT AUTO_INCREMENT PRIMARY KEY,
+        word_id INT,
+        antonym_word_id INT,
+        FOREIGN KEY(word_id) REFERENCES words(word_id),
+        FOREIGN KEY(antonym_word_id) REFERENCES words(word_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS word_families (
+        family_id INT AUTO_INCREMENT PRIMARY KEY,
+        root_word TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS word_family_members (
+        word_id INT,
+        family_id INT,
+        PRIMARY KEY(word_id, family_id),
+        FOREIGN KEY(word_id) REFERENCES words(word_id),
+        FOREIGN KEY(family_id) REFERENCES word_families(family_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS origins (
+        origin_id INT AUTO_INCREMENT PRIMARY KEY,
+        language TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS word_origins (
+        word_id INT,
+        origin_id INT,
+        PRIMARY KEY(word_id, origin_id),
+        FOREIGN KEY(word_id) REFERENCES words(word_id),
+        FOREIGN KEY(origin_id) REFERENCES origins(origin_id)
+      );
+      '''
+    )
+
+  conn.commit()
+
 
 def get_existing_words_from_database():
     existing_words = set()
@@ -134,6 +198,9 @@ def check_for_updates():
         insert_word(word, word_data['lemma'], get_ipa(word), pos_tag)
 
     update_words_with_missing_info()
+
+    conn.commit()
+
 
 def update_words_with_missing_info():
     """Fetches definitions and IPA for words that lack them in the database."""
@@ -212,15 +279,13 @@ def get_ipa(word):
         return None
 
 def connect_to_database():
-    return sqlite3.connect(DATABASE_NAME) 
-
+    return sqlite3.connect(db_filename) 
 
 def word_exists_in_database(conn, word): 
     cursor = conn.cursor()
     cursor.execute("SELECT EXISTS(SELECT 1 FROM words WHERE word = ?)", (word,))
     result = cursor.fetchone()
     return bool(result[0])
-
 
 def insert_word(word, lemma, ipa, pos="ADJECTIVE"):  
     connect_to_database()
@@ -259,8 +324,6 @@ def add_other_json_files():
                                 lemma = word_info.get("lemma", word)
                                 ipa = get_ipa(word)
                                 insert_word(word, lemma, ipa)
-
-add_other_json_files()
 
 def get_definition_website1(word):
     try:
@@ -315,5 +378,6 @@ def add_definition(word, definition):
 
     conn.commit()
 
-connect_to_database()
-initialize_database("language_data.sql") 
+if __name__ == "__main__":
+    create_tables()
+    add_other_json_files()
