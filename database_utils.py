@@ -243,20 +243,22 @@ def insert_word(word, lemma, ipa, pos="ADJECTIVE"):
     conn.commit()
 
 def add_other_json_files():
-    for filename in os.listdir('data/language'):
-        if filename.endswith(".json"):
-            with open(os.path.join('data/language', filename), 'r') as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError as e:
-                    print(f"Error decoding JSON in file {filename}: {e}")
-                    continue 
+    with connect_to_database() as conn:
+        cursor = conn.cursor()
+        for filename in os.listdir('data/language'):
+                if filename.endswith(".json"):
+                    with open(os.path.join('data/language', filename), 'r') as f:
+                        try:
+                            data = json.load(f)
+                        except json.JSONDecodeError as e:
+                            print(f"Error decoding JSON in file {filename}: {e}")
+                            continue 
 
-                for word, word_info in data.items():
-                    if not word_exists_in_database(word):
-                        lemma = word_info.get("lemma", word)
-                        ipa = get_ipa(word)
-                        insert_word(word, lemma, ipa)
+                        for word, word_info in data.items():
+                            if not word_exists_in_database(conn, word):
+                                lemma = word_info.get("lemma", word)
+                                ipa = get_ipa(word)
+                                insert_word(word, lemma, ipa)
 
 add_other_json_files()
 
