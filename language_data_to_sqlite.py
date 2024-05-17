@@ -3,16 +3,15 @@ import os
 import time
 from pydoc import doc
 import spacy
-from database_utils import part_of_speech, ipa
 
 from database_utils import (
   connect_to_database,
   get_definition_website1,
   get_definition_website2,
-  get_ipa,
   get_new_words_from_json,
-  insert_or_update_word,
   word_exists_in_database,
+  create_tables,
+  get_ipa,
 )
 
 nlp = spacy.load("en_core_web_sm")
@@ -24,103 +23,7 @@ conn = None
 
 connect_to_database()
 
-
-def add_new_words_to_database(new_words_filename="data/language/new_words.json", db_filename="language_data.db"):
-  with open(new_words_filename, 'r') as f:
-    new_words = json.load(f)
-
-  with connect_to_database() as conn:
-    cursor = conn.cursor()
-    for word in new_words:
-      data = all_word_data.get(word)
-      insert_or_update_word(conn, data)
-
-    conn.commit()
-
-
-def create_tables():
-  with connect_to_database() as conn:
-    cursor = conn.cursor()
-    cursor.executescript(
-      '''
-      CREATE TABLE IF NOT EXISTS words (
-        word_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        word TEXT UNIQUE,
-        lemma TEXT,
-        ipa TEXT,
-        pos TEXT,
-        definition TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS parts_of_speech(
-        pos_id INT AUTO_INCREMENT PRIMARY KEY,
-        pos_type TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS word_pos(
-        word_id INT,
-        pos_id INT,
-        PRIMARY KEY(word_id, pos_id),
-        FOREIGN KEY(word_id) REFERENCES words(word_id),
-        FOREIGN KEY(pos_id) REFERENCES parts_of_speech(pos_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS synonyms(
-        synonym_id INT AUTO_INCREMENT PRIMARY KEY,
-        word_id INT,
-        synonym_word_id INT,
-        FOREIGN KEY(word_id) REFERENCES words(word_id),
-        FOREIGN KEY(synonym_word_id) REFERENCES words(word_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS definitions (
-        definition_id INT AUTO_INCREMENT PRIMARY KEY,
-        word_id INT,
-        definition TEXT,
-        example_usage TEXT,
-        FOREIGN KEY(word_id) REFERENCES words(word_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS antonyms (
-        antonym_id INT AUTO_INCREMENT PRIMARY KEY,
-        word_id INT,
-        antonym_word_id INT,
-        FOREIGN KEY(word_id) REFERENCES words(word_id),
-        FOREIGN KEY(antonym_word_id) REFERENCES words(word_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS word_families (
-        family_id INT AUTO_INCREMENT PRIMARY KEY,
-        root_word TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS word_family_members (
-        word_id INT,
-        family_id INT,
-        PRIMARY KEY(word_id, family_id),
-        FOREIGN KEY(word_id) REFERENCES words(word_id),
-        FOREIGN KEY(family_id) REFERENCES word_families(family_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS origins (
-        origin_id INT AUTO_INCREMENT PRIMARY KEY,
-        language TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS word_origins (
-        word_id INT,
-        origin_id INT,
-        PRIMARY KEY(word_id, origin_id),
-        FOREIGN KEY(word_id) REFERENCES words(word_id),
-        FOREIGN KEY(origin_id) REFERENCES origins(origin_id)
-      );
-      '''
-    )
-
-  conn.commit()
-
-
-def get_part_of_speech(conn, word):
+def part_of_speech(conn, word):
   cursor = conn.cursor()
   cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
   result = cursor.fetchone()
@@ -160,7 +63,7 @@ def create_database(data_dir, database_name="language_data.db"):
                 SET lemma = %s, ipa = %s
                 WHERE word = %s AND (lemma IS NULL OR ipa IS NULL)
                 """
-                cursor.execute(update_query, (doc[0].lemma_, ipa, word))
+                cursor.execute(update_query, (doc[0].lemma_, get_ipa, word))
                 conn.commit()
   conn.close()
 
@@ -211,6 +114,49 @@ def create_database(data_dir, database_name="language_data.db"):
                 json.dump(data, f, indent=4)
     conn.commit()
 
+def insert_or_update_word(conn, word_data):
+    with conn.cursor() as cursor:
+        word = word_data['word']
+        part_of_speech = part_of_speech(conn, word) 
+        table_name = part_of_speech.lower() + "s"
+
+        cursor.execute(
+            f"SELECT definition FROM {table_name} WHERE word = ?", (word,)
+        )
+        existing_definition = cursor.fetchone()
+
+        if existing_definition and existing_definition[0] is not None:
+            # Word exists and has a definition, skip insertion/update
+            pass
+        else:
+            definition = word_data.get("definition")
+            if not definition:
+                definition = get_definition_website1(word) or get_definition_website2(word)
+
+            if existing_definition:
+                cursor.execute(
+                    f"UPDATE {table_name} SET definition = ? WHERE word = ?",
+                    (definition, word),
+                )
+            else:
+                cursor.execute(
+                    f"""
+                    INSERT INTO {table_name} (word, lemma, ipa, definition)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (word, word_data.get('lemma'), get_ipa(word), definition),
+                )
+
+
+def add_new_words_to_database(new_words_filename="data/language/new_words.json", db_filename="language_data.db"):
+  with open(new_words_filename, 'r') as f:
+    new_words = json.load(f)
+
+  with connect_to_database() as conn:
+    cursor = conn.cursor()
+    for word in new_words:
+      data = all_word_data.get(word)
+      insert_or_update_word(conn, data)
 
 def add_other_json_files():
   global all_word_data
@@ -229,8 +175,14 @@ def add_other_json_files():
 if __name__ == "__main__":
   create_tables()
 
-  new_words, all_word_data = get_new_words_from_json()  # Call before database connection
+  new_words, all_word_data = get_new_words_from_json() 
   if new_words:
-    add_new_words_to_database()  # Now with correct connection
-
-  add_other_json_files()
+    add_new_words_to_database()
+  else:
+    print("No new words to add to database.") 
+    
+    add_other_json_files()
+    print("All words added to database.")
+    print(f"Total time: {time.time() - start_time} seconds")
+else:
+  print("This file is not meant to be imported.")
