@@ -8,7 +8,8 @@ from database_utils import (
     get_definition_website1, 
     get_definition_website2,
     connect_to_database,
-    get_ipa
+    get_ipa,
+    word_exists_in_database
 )
 nlp = spacy.load("en_core_web_sm")
 db_filename = "language_data.db" 
@@ -23,7 +24,7 @@ def get_part_of_speech(word):
         result = cursor.fetchone()
 
         if result:
-            return result[0]  # Return the POS directly
+            return result[0] 
         else:
             doc = nlp(word)
             return doc[0].pos_
@@ -33,10 +34,10 @@ def add_new_words_to_database(new_words_filename="data/language/new_words.json",
     with open(new_words_filename, 'r') as f:
         new_words = json.load(f)
 
-    with connect_to_database() as conn:  # Connection is established and managed here
-        cursor = conn.cursor()  # Cursor created after connection
+    with connect_to_database() as conn:  
+        cursor = conn.cursor() 
         for word in new_words:
-            data = all_word_data.get(word)  # Retrieve associated data
+            data = all_word_data.get(word)  
             insert_or_update_word(data, cursor)
 
         conn.commit()
@@ -83,16 +84,15 @@ def create_database(data_dir, database_name="language_data.db"):
   """
   cursor.execute(create_table_query)
 
-  for word_data in data.values():  # Iterate over word_data objects
-    word = word_data['word']  # Extract the word
+  for word_data in data.values(): 
+    word = word_data['word'] 
     check_query = f"SELECT EXISTS(SELECT 1 FROM {language} WHERE word=?)"
     cursor.execute(check_query, (word,))
-    if not cursor.fetchone()[0]:  # If the word doesn't exist
+    if not cursor.fetchone()[0]:  
       insert_query = f"INSERT INTO {part_of_speech} (word, lemma, ipa, definition) VALUES (?, ?, ?, ?)"
     cursor.execute(insert_query, (word, word_data.get('lemma'), word_data.get('ipa'), word_data.get('definition')))
   conn.commit()
 
-  # Insert data from JSON files into their respective tables
   while True:
     for filename in os.listdir(data_dir):
       if filename.endswith(".json"):
@@ -102,24 +102,20 @@ def create_database(data_dir, database_name="language_data.db"):
         for word in data:
           check_query = f"SELECT EXISTS(SELECT 1 FROM {language} WHERE word=?)"
           cursor.execute(check_query, (word,))
-          if not cursor.fetchone()[0]:  # If the word doesn't exist
+          if not cursor.fetchone()[0]:
             insert_query = f"INSERT INTO {language} (word) VALUES (?)"
           cursor.execute(insert_query, (word,))
 
-          # Check if definition is missing
           word_data = data[word]
           if not word_data.get('definition'):
-            # Attempt Website 1
             definition = get_definition_website1(word_data['word'])
             if definition:
               word_data['definition'] = definition
             else:
-              # Attempt Website 2
               definition = get_definition_website2(word_data['word'])
               if definition:
                 word_data['definition'] = definition
 
-            # Update the JSON file if a definition was found
             if definition:  
               with open(os.path.join(data_dir, filename), 'w') as f:
                 json.dump(data, f, indent=4)
@@ -233,8 +229,8 @@ def get_new_words_from_json():
         if filename.endswith(".json"):
             with open(os.path.join('data/language', filename), 'r') as f:
                 data = json.load(f)
-                for word_dict in data:  # Iterate over list of dictionaries
-                    for word, word_info in word_dict.items():  # Extract word and info
+                for word_dict in data:  
+                    for word, word_info in word_dict.items():  
                         if word not in new_words:
                             new_words.add(word)
                             all_word_data[word] = word_info
@@ -249,34 +245,48 @@ def get_new_words_from_json():
                             all_word_data[word] = word_data
     return new_words, all_word_data
 
+def add_other_json_files():
+    with connect_to_database() as conn:
+        cursor = conn.cursor()
+
+        for filename in os.listdir('data/language'):
+            if filename.endswith(".json") and filename != "new_words.json": 
+                with open(os.path.join('data/language', filename), 'r') as f:
+                    data = json.load(f)
+                    for word, word_info in data.items():
+                        if not word_exists_in_database(conn, word):
+                            part_of_speech = get_part_of_speech(word)
+
+                            insert_or_update_word(
+                                {"word": word, "definition": word_info.get("definition")},
+                                cursor, part_of_speech  
+                            )
+
+        conn.commit()
+
 def insert_or_update_word(word_data, cursor):
     word = word_data['word']
     part_of_speech = get_part_of_speech(word)
     table_name = part_of_speech.lower() + "s"
 
-    # Check if the word exists
     cursor.execute(
         f"SELECT definition FROM {table_name} WHERE word = %s", (word,)
     )
     existing_definition = cursor.fetchone()
 
     if existing_definition and existing_definition[0] is not None:
-        # Word exists and has a definition, skip insertion/update
         pass
     else:
-        definition = word_data.get("definition")  # Get definition if available
+        definition = word_data.get("definition")
         if not definition:
             definition = get_definition_website1(word) or get_definition_website2(word)
 
-        # Insert or update the word
         if existing_definition:
-            # Word exists but doesn't have a definition, so update it
             cursor.execute(
                 f"UPDATE {table_name} SET definition = %s WHERE word = %s",
                 (definition, word),
             )
         else:
-            # Word doesn't exist, so insert it
             cursor.execute(
                 f"""
                 INSERT INTO {table_name} (word, lemma, ipa, definition)
@@ -286,14 +296,11 @@ def insert_or_update_word(word_data, cursor):
             )
 
 if __name__ == "__main__":
-    create_tables()
+    create_tables() 
 
     new_words, all_word_data = get_new_words_from_json()
 
-    connect_to_database()
-    with conn.cursor() as cursor:
-        for word in new_words:
-            word_data = all_word_data[word]
-            insert_or_update_word(word_data, cursor)  
+    if new_words:
+        add_new_words_to_database(new_words)  
 
-        conn.commit()
+    add_other_json_files()
