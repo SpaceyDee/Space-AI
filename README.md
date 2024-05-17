@@ -5,4 +5,4 @@ This is just a little project I have started. Mostly using various A.I with the 
 
 I will update this as I develop it firther. 
 
-Am also very away it's broken right now haha.
+Am also very aware It's broken right now haha.
