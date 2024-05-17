@@ -26,7 +26,7 @@ def initialize_database(database_file):
                 # Your MySQL credentials
                 host="127.0.0.1",
                 user="root", 
-                password="StavenKoning13"
+                password="PASSWORD"
             )
             cursor = conn.cursor()
             cursor.execute(sql, multi=True)  # Allows multiple statements in the SQL file 
