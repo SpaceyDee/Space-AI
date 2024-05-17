@@ -35,16 +35,22 @@ def initialize_database(database_file):
             print(f"Error initializing database: {e}")
 
 def get_new_words_from_json():
-    new_words = set()  # Use a set for simple comparisons
+    new_words = set()
     all_word_data = {}
     for filename in os.listdir('data/language'):
         if filename.endswith(".json"):
             with open(os.path.join('data/language', filename), 'r') as f:
-                data = json.load(f)
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON in file {filename}: {e}")
+                    continue  # Skip this file if there's an error
+
                 for word, word_info in data.items():
                     if word not in new_words:
-                        new_words.add(word)  # Add words to the set
+                        new_words.add(word)
                         all_word_data[word] = word_info
+                        # Process the word (e.g., lemmatization, POS tagging)
                         doc = nlp(word)
                         token = doc[0]
                         word_data = {
@@ -53,7 +59,7 @@ def get_new_words_from_json():
                             "pos": token.pos_,
                             "entity_type": token.ent_type_,
                         }
-                        all_word_data[word] = word_data  # Store word data in the dictionary
+                        all_word_data[word] = word_data
     return new_words, all_word_data
 
 def get_existing_words_from_database():
@@ -92,19 +98,25 @@ def get_user_input(prompt):
         except ValueError:
             print("Invalid input. Please try again.")
 
-def generate_response(input, mind_data):
-    doc = nlp(input)
+def generate_response(input_text, word_data):
+    input_doc = nlp(input_text)
 
     most_similar_word = None
     highest_similarity = 0.0
-    for word in mind_data:
-        token = nlp(word)
-        similarity = doc.similarity(token)
+
+    for word, info in word_data.items(): 
+        word_doc = nlp(word)
+        similarity = input_doc.similarity(word_doc)
+
         if similarity > highest_similarity:
             highest_similarity = similarity
             most_similar_word = word
 
-    return most_similar_word
+    if most_similar_word:
+        definition = word_data[most_similar_word].get("definition")
+        return f"{most_similar_word}: {definition}"
+    else:
+        return None
 
 def print_response(response):
     print("Bot:", response)

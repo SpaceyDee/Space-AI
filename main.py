@@ -10,8 +10,10 @@ from database_utils import (
     print_response,
     handle_unknown_word,
     check_for_updates,
-    get_new_words_from_json,
-    get_existing_words_from_database
+    connect_to_database,
+    initialize_database,
+    get_existing_words_from_database,
+    get_new_words_from_json
 )
 
 nltk.download('cmudict')  # Ensure CMUDict is downloaded
@@ -24,22 +26,33 @@ nlp = spacy.load('en_core_web_sm')
 new_words = []
 last_update_time = time.time()
 
+def main():
+    connect_to_database()
+    initialize_database("language_data.sql")
 
-# Main program loop
-if __name__ == "__main__":
+    word_data = {}  # Initialize word_data dictionary outside the loop
+
     while True:
         user_input = get_user_input(prompt="You: ")
         processed_input = preprocess_input(user_input)
-        response = generate_response(processed_input)
-        new_words, all_word_data = get_new_words_from_json()
-        existing_words = get_existing_words_from_database()
-        if response:
-            print_response(response) 
-        else: 
-            handle_unknown_word(processed_input)
-            new_words.append(processed_input)
-
-        check_for_updates()
 
         if processed_input.lower() == "exit":
             break
+
+        # Update word_data with new or existing words
+        new_words, all_word_data = get_new_words_from_json()
+        existing_words = get_existing_words_from_database()
+        word_data.update(all_word_data)
+
+        # Generate response using updated word_data
+        response = generate_response(processed_input, word_data)
+
+        if response:
+            print_response(response)
+        else:
+            handle_unknown_word(processed_input)
+
+        check_for_updates() 
+
+if __name__ == "__main__":
+    main()

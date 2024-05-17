@@ -3,13 +3,13 @@ from pydoc import doc
 import time
 import spacy
 import os
-import mysql.connector
 from database_utils import (
     get_new_words_from_json,
     get_definition_website1, 
-    get_definition_website2
+    get_definition_website2,
+    connect_to_database,
+    get_ipa
 )
-
 nlp = spacy.load("en_core_web_sm")
 db_filename = "language_data.db" 
 start_time = time.time()
@@ -17,41 +17,20 @@ new_words, all_word_data = get_new_words_from_json()
 cursor = None
 conn = None
 
-
-# Database connection and creation
 def get_part_of_speech(word):
-    from database_utils import connect_to_database
-    connect_to_database()
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT pos FROM words WHERE word = %s", (word,))
+        result = cursor.fetchone()
 
-    cursor.execute("SELECT pos FROM words WHERE word = %s", (word,))  
-    result = cursor.fetchone()
-
-    if result:
-        return result[-1]  # Return POS from the database
-    else:
-        doc = nlp(word)
-        token = doc[-1]
-        part_of_speech = token.pos_
-
-        # Update the database with the new POS 
-        cursor.execute("""
-            UPDATE words 
-            SET pos = %s
-            WHERE word = %s
-        """, (part_of_speech, word))
-
-        conn.commit()
-
-        return part_of_speech
+        if result:
+            return result[0]  # Return the POS directly
+        else:
+            doc = nlp(word)
+            return doc[0].pos_
     
 def create_database(data_dir, database_name="language_data.db"):
   from database_utils import part_of_speech, ipa
-  conn = mysql.connector.connect(
-        host="127.0.0.1",
-        user="root",
-        password="StavenKoning13",
-        database=database_name
-  )
+  connect_to_database()
   cursor = conn.cursor()
 
   for filename in os.listdir('data/language'):
@@ -134,13 +113,9 @@ def create_database(data_dir, database_name="language_data.db"):
     conn.commit()
 
 def create_tables():
-  conn = mysql.connector.connect(
-        host="127.0.0.1",
-        user="root",
-        password="StavenKoning13",
-        database="language_data"
-  )
-  cursor = conn.cursor()
+  connect_to_database()
+  with conn.cursor() as cursor:
+    cursor = conn.cursor()
 
   cursor.execute(''' 
     CREATE TABLE IF NOT EXISTS words(
@@ -234,26 +209,92 @@ def create_tables():
   ''')
 
   conn.commit()
-  conn.close()
 
 if new_words:
   def add_new_words_to_database(new_words_filename="data/language/new_words.json", db_filename="language_data.db"):
     with open(new_words_filename, 'r') as f:
       new_words = json.load(f)
-
-    conn = mysql.connector.connect(
-        host="127.0.0.1",
-        user="root",
-        password="StavenKoning13",
-        database="language_data"
-    )
+    connect_to_database()
     cursor = conn.cursor()
     for word in new_words:
       data = all_word_data.get(word)  # Retrieve associated data
-      cursor.execute("INSERT INTO words (word, lemma, ipa, definition) VALUES (%s, %s, %s, %s)",
-                     (word, data.get('lemma'), data.get('ipa'), data.get('definition')))
+      cursor.execute(
+        "INSERT INTO words (word, lemma, ipa, definition) VALUES (%s, %s, %s, %s)",
+        (word, data.get('lemma'), data.get('ipa'), data.get('definition'))
+      )
     conn.commit()
     conn.close()
 
   add_new_words_to_database()
 
+def get_new_words_from_json():
+    new_words = set()
+    all_word_data = {}
+    for filename in os.listdir('data/language'):
+        if filename.endswith(".json"):
+            with open(os.path.join('data/language', filename), 'r') as f:
+                data = json.load(f)
+                for word_dict in data:  # Iterate over list of dictionaries
+                    for word, word_info in word_dict.items():  # Extract word and info
+                        if word not in new_words:
+                            new_words.add(word)
+                            all_word_data[word] = word_info
+                            doc = nlp(word)
+                            token = doc[0]
+                            word_data = {
+                                "word": token.text,
+                                "lemma": token.lemma_,
+                                "pos": token.pos_,
+                                "entity_type": token.ent_type_,
+                            }
+                            all_word_data[word] = word_data
+    return new_words, all_word_data
+
+def insert_or_update_word(word_data, cursor):
+    word = word_data['word']
+    part_of_speech = get_part_of_speech(word)
+    table_name = part_of_speech.lower() + "s"
+
+    # Check if the word exists
+    cursor.execute(
+        f"SELECT definition FROM {table_name} WHERE word = %s", (word,)
+    )
+    existing_definition = cursor.fetchone()
+
+    if existing_definition and existing_definition[0] is not None:
+        # Word exists and has a definition, skip insertion/update
+        pass
+    else:
+        definition = word_data.get("definition")  # Get definition if available
+        if not definition:
+            definition = get_definition_website1(word) or get_definition_website2(word)
+
+        # Insert or update the word
+        if existing_definition:
+            # Word exists but doesn't have a definition, so update it
+            cursor.execute(
+                f"UPDATE {table_name} SET definition = %s WHERE word = %s",
+                (definition, word),
+            )
+        else:
+            # Word doesn't exist, so insert it
+            cursor.execute(
+                f"""
+                INSERT INTO {table_name} (word, lemma, ipa, definition)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (word, word_data.get('lemma'), get_ipa(word), definition),
+            )
+
+if __name__ == "__main__":
+    create_tables()
+
+    new_words, all_word_data = get_new_words_from_json()
+
+    connect_to_database()
+    with conn.cursor() as cursor:
+        for word in new_words:
+            word_data = all_word_data[word]
+            insert_or_update_word(word_data, cursor)  
+
+        conn.commit()
