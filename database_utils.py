@@ -227,7 +227,7 @@ def connect_to_database():  # Remove the database_name argument
         conn = mysql.connector.connect(
             host="127.0.0.1",
             user="root",
-            password="StavenKoning13"
+            password="PASSWORD"
         )
         cursor = conn.cursor()
 
