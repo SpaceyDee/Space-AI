@@ -1,12 +1,18 @@
 import spacy
 import string
 import os
+import asyncio
+import aiohttp
 import requests
 from bs4 import BeautifulSoup
 import json
 import pyphen
 import sqlite3
 import lxml.html as lhtml
+from time import time
+import sys
+sys.path.append('C:/Users/Davis/Ai_Thing') 
+
 
 nlp = spacy.load('en_core_web_sm')
 db_filename = "language_data.db"
@@ -94,21 +100,29 @@ def create_tables():
         FOREIGN KEY(word_id) REFERENCES words(word_id),
         FOREIGN KEY(origin_id) REFERENCES origins(origin_id)
       );
+
+      CREATE TABLE IF NOT EXISTS pronouns (
+        word_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        word TEXT UNIQUE,
+        lemma TEXT,
+        ipa TEXT,
+        definition TEXT
+        );
       '''
     )
 
   conn.commit()
 
 def get_part_of_speech(conn, word):
-    cursor = conn.cursor() 
+    cursor = conn.cursor()  
     cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
     result = cursor.fetchone()
 
     if result:
-        return result[0]  
+        return result[0]
     else:
         doc = nlp(word)
-        return doc[0].pos_ 
+        return doc[0].pos_
 
 def get_new_words_from_json():
     new_words = set()
@@ -325,12 +339,13 @@ def insert_word(word, lemma, ipa, pos="ADJECTIVE"):
 
 def insert_or_update_word(conn, word_data):
     word = word_data['word']
-    part_of_speech = get_part_of_speech(conn, word)  # Pass conn to get_part_of_speech
+    part_of_speech = get_part_of_speech(conn, word)  
     table_name = part_of_speech.lower() + "s"
 
-    cursor = conn.cursor() 
+    cursor = conn.cursor()  
+
     cursor.execute(
-        f"SELECT definition FROM {table_name} WHERE word = ?", (word,)
+        f"SELECT definition FROM words WHERE word = ?", (word,)
     )
     existing_definition = cursor.fetchone()
 
@@ -339,38 +354,133 @@ def insert_or_update_word(conn, word_data):
     else:
         definition = word_data.get("definition")
         if not definition:
-            definition = get_definition_website1(word) or get_definition_website2(word)
+            # Extract the definition from the tuple 
+            definition, _ = get_definition_website1(word)  
+            if not definition:
+                definition = get_definition_website2(word)
 
+        # Insert or update the word (definition is now a single string)
         if existing_definition:
             cursor.execute(
-                f"UPDATE {table_name} SET definition = ? WHERE word = ?",
+                f"UPDATE words SET definition = ? WHERE word = ?",
                 (definition, word),
             )
         else:
             cursor.execute(
                 f"""
-                INSERT INTO {table_name} (word, lemma, ipa, definition)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO words (word, lemma, ipa, pos, definition)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (word, word_data.get('lemma'), get_ipa(word), definition),
+                (word, word_data.get('lemma'), get_ipa(word), part_of_speech, definition),
             )
+    conn.commit()
 
-def add_other_json_files():
-    global all_word_data
+
+def add_new_words_to_database(all_word_data):
+    start_time = time()  # Call the time() function directly
     with connect_to_database() as conn:
         cursor = conn.cursor()
+        filename = "data/language/new_words.json"
+        with open(filename, 'r') as f:
+            new_words = json.load(f)
 
-        for filename in os.listdir('data/language'):
-            if filename.endswith(".json") and filename != "new_words.json":
-                with open(os.path.join('data/language', filename), 'r') as f:
-                    data = json.load(f)
-                    for word, word_info in data.items():
-                        if not word_exists_in_database(conn, word):
-                            insert_or_update_word(
-                                conn, {"word": word, "definition": word_info.get("definition")}
-                            )
+        for word in new_words:
+            data = all_word_data.get(word)
+            insert_or_update_word(conn, data)
+            print(f"Added/updated word: {word}")
 
-        conn.commit()
+    end_time = time()  # Call the time() function directly
+    print(f"Finished adding new words in {end_time - start_time:.2f} seconds")
+
+async def fetch_definition(session, word, url_func):
+    try:
+        async with session.get(url_func(word)) as response:
+            if response.status == 200:
+                content = await response.text()
+                if "urbandictionary" in url_func(word):
+                    return get_definition_website1(word, content)  
+                else:
+                    return get_definition_website2(word, content)
+            else:
+                return None
+    except aiohttp.ClientError as e:
+        print(f"Error fetching definition for '{word}': {e}")
+        return None
+
+
+async def get_definitions_concurrently(words):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for word in words:
+            task1 = asyncio.create_task(fetch_definition(session, word, get_definition_website1))
+            task2 = asyncio.create_task(fetch_definition(session, word, get_definition_website2))
+            tasks.extend([task1, task2])
+        results = await asyncio.gather(*tasks)
+
+        definitions = {}
+        for word, (def1, def2) in zip(words, results):
+            definitions[word] = def1 or def2  
+            return definitions
+
+async def process_file(filename, all_word_data):
+    for insert_or_update_word_async in all_word_data:
+        tasks = [] 
+    with open(os.path.join('data/language', filename), 'r') as f:
+        data = json.load(f)
+        for word, word_info in data.items():
+            if not word_exists_in_database(conn, word):
+                tasks.append(
+                    asyncio.create_task(insert_or_update_word_async(conn, {"word": word, "definition": word_info.get("definition")}))
+                )
+    await asyncio.gather(*tasks) 
+
+async def add_other_json_files():
+    global all_word_data
+
+    tasks = []
+    for filename in os.listdir('data/language'):
+        if filename.endswith(".json") and filename != "new_words.json":
+            tasks.append(asyncio.create_task(process_file(filename, all_word_data)))
+    await asyncio.gather(*tasks)
+    conn.commit()
+
+
+if __name__ == "__main__":
+    create_tables()
+
+    start_time = time()
+    new_words, all_word_data = get_new_words_from_json()
+    end_time = time()
+    print(f"Loaded {len(new_words)} new words from JSON in {end_time - start_time:.2f} seconds")
+
+    add_new_words_to_database()
+    asyncio.run(add_other_json_files())  # Run asynchronously
+    conn.close() # Close the database when finished
+    print("All done! Database populated successfully.")
+
+def add_other_json_files(all_word_data):
+    batch_size = 100  # You can adjust the batch size as needed
+    words_to_insert = []
+
+    for filename in os.listdir('data/language'):
+        if filename.endswith(".json") and filename != "new_words.json":
+            with open(os.path.join('data/language', filename), 'r') as f:
+                data = json.load(f)
+                for word, word_info in data.items():
+                    if not word_exists_in_database(conn, word):
+                        words_to_insert.append({"word": word, "definition": word_info.get("definition")})
+                        if len(words_to_insert) >= batch_size:
+                            definitions = asyncio.run(get_definitions_concurrently(words_to_insert))
+                            for word_data in words_to_insert:
+                                word_data["definition"] = definitions.get(word_data["word"])
+                                insert_or_update_word(conn, word_data)
+                            words_to_insert = []
+
+    if words_to_insert:
+        definitions = asyncio.run(get_definitions_concurrently(words_to_insert))
+        for word_data in words_to_insert:
+            word_data["definition"] = definitions.get(word_data["word"])
+            insert_or_update_word(conn, word_data)
 
 def get_definition_website1(word):
     try:
@@ -424,7 +534,3 @@ def add_definition(word, definition):
     """, (definition, word))
 
     conn.commit()
-
-if __name__ == "__main__":
-    create_tables()
-    add_other_json_files()

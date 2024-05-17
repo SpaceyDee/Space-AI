@@ -9,10 +9,10 @@ from database_utils import (
   get_definition_website1,
   get_definition_website2,
   get_new_words_from_json,
-  word_exists_in_database,
+  add_new_words_to_database,
+  add_other_json_files,
   create_tables,
   get_ipa,
-  insert_or_update_word
 )
 
 nlp = spacy.load("en_core_web_sm")
@@ -115,55 +115,18 @@ def create_database(data_dir, database_name="language_data.db"):
                 json.dump(data, f, indent=4)
     conn.commit()
 
-def get_part_of_speech(conn, word):
-    with conn.cursor() as cursor:  # Use a with block for better resource management
-        cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
-        result = cursor.fetchone()
-
-        if result:
-            return result[0]
-        else:
-            doc = nlp(word)
-            return doc[0].pos_
-
-
-
-
-def add_new_words_to_database(new_words_filename="data/language/new_words.json", db_filename="language_data.db"):
-  with open(new_words_filename, 'r') as f:
-    new_words = json.load(f)
-
-  with connect_to_database() as conn:
-    cursor = conn.cursor()
-    for word in new_words:
-      data = all_word_data.get(word)
-      insert_or_update_word(conn, data)
-
-def add_other_json_files():
-  global all_word_data
-  with connect_to_database() as conn:
-    cursor = conn.cursor()
-
-    for filename in os.listdir('data/language'):
-      if filename.endswith(".json") and filename != "new_words.json":
-        with open(os.path.join('data/language', filename), 'r') as f:
-          data = json.load(f)
-          for word, word_info in data.items():
-            if not word_exists_in_database(conn, word):
-              insert_or_update_word(conn, {"word": word, "definition": word_info.get("definition")})
-
-
 if __name__ == "__main__":
-  create_tables()
+    create_tables()
 
-  new_words, all_word_data = get_new_words_from_json() 
-  if new_words:
-    add_new_words_to_database()
-  else:
-    print("No new words to add to database.") 
-    
-    add_other_json_files()
-    print("All words added to database.")
-    print(f"Total time: {time.time() - start_time} seconds")
-else:
-  print("This file is not meant to be imported.")
+    start_time = time.time()  
+    new_words, all_word_data = get_new_words_from_json()
+    end_time = time.time()
+    print(f"Loaded {len(new_words)} new words from JSON in {end_time - start_time:.2f} seconds")
+
+    if new_words:
+     add_new_words_to_database(all_word_data)  # Pass all_word_data to the function
+
+    add_other_json_files(all_word_data)
+    add_new_words_to_database(all_word_data)
+    conn.close() 
+    print("All done! Database populated successfully.")
