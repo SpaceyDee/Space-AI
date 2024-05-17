@@ -28,6 +28,19 @@ def get_part_of_speech(word):
             doc = nlp(word)
             return doc[0].pos_
     
+def add_new_words_to_database(new_words_filename="data/language/new_words.json", db_filename="language_data.db"): 
+    connect_to_database
+    with open(new_words_filename, 'r') as f:
+        new_words = json.load(f)
+
+    with connect_to_database() as conn:  # Connection is established and managed here
+        cursor = conn.cursor()  # Cursor created after connection
+        for word in new_words:
+            data = all_word_data.get(word)  # Retrieve associated data
+            insert_or_update_word(data, cursor)
+
+        conn.commit()
+
 def create_database(data_dir, database_name="language_data.db"):
   from database_utils import part_of_speech, ipa
   connect_to_database()
@@ -211,20 +224,6 @@ def create_tables():
   conn.commit()
 
 if new_words:
-  def add_new_words_to_database(new_words_filename="data/language/new_words.json", db_filename="language_data.db"):
-    with open(new_words_filename, 'r') as f:
-      new_words = json.load(f)
-    connect_to_database()
-    cursor = conn.cursor()
-    for word in new_words:
-      data = all_word_data.get(word)  # Retrieve associated data
-      cursor.execute(
-        "INSERT INTO words (word, lemma, ipa, definition) VALUES (%s, %s, %s, %s)",
-        (word, data.get('lemma'), data.get('ipa'), data.get('definition'))
-      )
-    conn.commit()
-    conn.close()
-
   add_new_words_to_database()
 
 def get_new_words_from_json():
