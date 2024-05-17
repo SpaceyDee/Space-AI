@@ -15,31 +15,8 @@ DATABASE_NAME = 'language_data.sql'
 conn = None
 cursor = None
 
-def get_new_words_from_json():
-    new_words = set()
-    all_word_data = {}
-    for filename in os.listdir('data/language'):
-        if filename.endswith(".json"):
-            with open(os.path.join('data/language', filename), 'r') as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError as e:
-                    print(f"Error decoding JSON in file {filename}: {e}")
-                    continue  
-                for word, word_info in data.items():
-                    if word not in new_words:
-                        new_words.add(word)
-                        all_word_data[word] = word_info
-                        doc = nlp(word)
-                        token = doc[0]
-                        word_data = {
-                            "word": token.text,
-                            "lemma": token.lemma_,
-                            "pos": token.pos_,
-                            "entity_type": token.ent_type_,
-                        }
-                        all_word_data[word] = word_data
-    return new_words, all_word_data
+def connect_to_database():
+    return sqlite3.connect(db_filename)
 
 def create_tables():
   with connect_to_database() as conn:
@@ -122,6 +99,48 @@ def create_tables():
 
   conn.commit()
 
+def get_part_of_speech(conn, word):
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
+        result = cursor.fetchone()
+
+    if result:
+        return result[0]  # Return the POS directly
+    else:
+        doc = nlp(word)
+        return doc[0].pos_  # Return the POS from spaCy
+
+def get_new_words_from_json():
+    new_words = set()
+    all_word_data = {}
+    for filename in os.listdir('data/language'):
+        if filename.endswith(".json"):
+            with open(os.path.join('data/language', filename), 'r') as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON in file {filename}: {e}")
+                    continue
+                # Handle both dictionary and list of dictionaries format
+                if isinstance(data, list):
+                    for word_dict in data:
+                        all_word_data.update(word_dict)
+                        new_words.update(word_dict.keys())
+                else:
+                    all_word_data.update(data)
+                    new_words.update(data.keys())
+                # Rest of the word processing (lemmatization etc.)
+                for word in new_words:
+                    doc = nlp(word)
+                    token = doc[0]
+                    word_data = {
+                        "word": token.text,
+                        "lemma": token.lemma_,
+                        "pos": token.pos_,
+                        "entity_type": token.ent_type_,
+                    }
+                    all_word_data[word] = word_data
+    return new_words, all_word_data
 
 def get_existing_words_from_database():
     existing_words = set()
@@ -278,9 +297,6 @@ def get_ipa(word):
         print(f"IPA retrieval error for '{word}': {e}")
         return None
 
-def connect_to_database():
-    return sqlite3.connect(db_filename) 
-
 def word_exists_in_database(conn, word): 
     cursor = conn.cursor()
     cursor.execute("SELECT EXISTS(SELECT 1 FROM words WHERE word = ?)", (word,))
@@ -307,23 +323,54 @@ def insert_word(word, lemma, ipa, pos="ADJECTIVE"):
 
     conn.commit()
 
+def insert_or_update_word(conn, word_data):
+    with conn.cursor() as cursor:
+        word = word_data['word']
+        part_of_speech = get_part_of_speech(conn, word) # Retrieve POS before using it
+        table_name = part_of_speech.lower() + "s"
+
+        cursor.execute(
+            f"SELECT definition FROM {table_name} WHERE word = ?", (word,)
+        )
+        existing_definition = cursor.fetchone()
+
+    if existing_definition and existing_definition[0] is not None:
+        pass
+    else:
+        definition = word_data.get("definition")
+        if not definition:
+            definition = get_definition_website1(word) or get_definition_website2(word)
+
+        if existing_definition:
+            cursor.execute(
+                f"UPDATE {table_name} SET definition = ? WHERE word = ?",
+                (definition, word),
+            )
+        else:
+            cursor.execute(
+                f"""
+                INSERT INTO {table_name} (word, lemma, ipa, definition)
+                VALUES (?, ?, ?, ?)
+                """,
+                (word, word_data.get('lemma'), get_ipa(word), definition),
+            )
+
 def add_other_json_files():
+    global all_word_data
     with connect_to_database() as conn:
         cursor = conn.cursor()
-        for filename in os.listdir('data/language'):
-                if filename.endswith(".json"):
-                    with open(os.path.join('data/language', filename), 'r') as f:
-                        try:
-                            data = json.load(f)
-                        except json.JSONDecodeError as e:
-                            print(f"Error decoding JSON in file {filename}: {e}")
-                            continue 
 
-                        for word, word_info in data.items():
-                            if not word_exists_in_database(conn, word):
-                                lemma = word_info.get("lemma", word)
-                                ipa = get_ipa(word)
-                                insert_word(word, lemma, ipa)
+        for filename in os.listdir('data/language'):
+            if filename.endswith(".json") and filename != "new_words.json":
+                with open(os.path.join('data/language', filename), 'r') as f:
+                    data = json.load(f)
+                    for word, word_info in data.items():
+                        if not word_exists_in_database(conn, word):
+                            insert_or_update_word(
+                                conn, {"word": word, "definition": word_info.get("definition")}
+                            )
+
+        conn.commit()
 
 def get_definition_website1(word):
     try:
