@@ -5,13 +5,13 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import pyphen
+import sqlite3
 import lxml.html as lhtml
 import mysql.connector
 
 nlp = spacy.load('en_core_web_sm')
 DATABASE_NAME = 'language_data.sql'
 
-# Create a global database connection and cursor
 conn = None
 cursor = None
 
@@ -23,13 +23,12 @@ def initialize_database(database_file):
             with open(database_file, "r") as f:
                 sql = f.read()
             conn = mysql.connector.connect(
-                # Your MySQL credentials
                 host="127.0.0.1",
                 user="root", 
                 password="PASSWORD"
             )
             cursor = conn.cursor()
-            cursor.execute(sql, multi=True)  # Allows multiple statements in the SQL file 
+            cursor.execute(sql, multi=True)  
             conn.commit()
         except Exception as e:
             print(f"Error initializing database: {e}")
@@ -44,13 +43,11 @@ def get_new_words_from_json():
                     data = json.load(f)
                 except json.JSONDecodeError as e:
                     print(f"Error decoding JSON in file {filename}: {e}")
-                    continue  # Skip this file if there's an error
-
+                    continue  
                 for word, word_info in data.items():
                     if word not in new_words:
                         new_words.add(word)
                         all_word_data[word] = word_info
-                        # Process the word (e.g., lemmatization, POS tagging)
                         doc = nlp(word)
                         token = doc[0]
                         word_data = {
@@ -68,7 +65,7 @@ def get_existing_words_from_database():
     results = cursor.fetchall()
 
     for result in results:
-        existing_words.add(result[0])  # Extract word from result
+        existing_words.add(result[0])  
 
     return existing_words
 
@@ -129,11 +126,11 @@ def check_for_updates():
     new_words, all_word_data = get_new_words_from_json()
     existing_words = get_existing_words_from_database()
 
-    words_to_insert = new_words - existing_words  # Find words not in the database
+    words_to_insert = new_words - existing_words  
 
     for word in words_to_insert:
         word_data = all_word_data[word]  
-        pos_tag = word_data.get("pos", "ADJECTIVE")  # Get POS or default to "ADJECTIVE"
+        pos_tag = word_data.get("pos", "ADJECTIVE")  
         insert_word(word, word_data['lemma'], get_ipa(word), pos_tag)
 
     update_words_with_missing_info()
@@ -157,14 +154,7 @@ def update_words_with_missing_info():
         # Get IPA if needed
         if not get_ipa(word):  
             ipa = get_ipa(word)
-            insert_word(word, word.lemma_, ipa)  # Update the IPA in the database
-
-def word_exists_in_database(word):
-    """Efficiently checks if a word exists in the database."""
-    cursor.execute("SELECT EXISTS(SELECT 1 FROM words WHERE word = %s)", (word,))
-    result = cursor.fetchone()
-
-    return bool(result[0])
+            insert_word(word, word.lemma_, ipa)  
 
 def handle_unknown_word(word):
     definition = get_user_input("I'm not familiar with the word '{}'. Could you please define it for me? ".format(word))
@@ -190,7 +180,7 @@ def handle_unknown_word(word):
     try:
         with open('data/language/new_words.json', 'w') as f:
             json.dump(new_words, f, indent=4)
-    except (IOError, json.JSONDecodeError) as e:  # IOError covers more potential file issues
+    except (IOError, json.JSONDecodeError) as e:  
         print(f"Error saving new words file: {e}")
 
     insert_word(word, lemma, ipa)
@@ -221,21 +211,21 @@ def get_ipa(word):
         print(f"IPA retrieval error for '{word}': {e}")
         return None
 
-def connect_to_database():  # Remove the database_name argument
-    global conn, cursor
-    if conn is None or not conn.is_connected():
-        conn = mysql.connector.connect(
-            host="127.0.0.1",
-            user="root",
-            password="PASSWORD"
-        )
-        cursor = conn.cursor()
+def connect_to_database():
+    return sqlite3.connect(DATABASE_NAME) 
 
-def insert_word(word, lemma, ipa, pos="ADJECTIVE"):  # Default to 'ADJECTIVE' 
+
+def word_exists_in_database(conn, word): 
+    cursor = conn.cursor()
+    cursor.execute("SELECT EXISTS(SELECT 1 FROM words WHERE word = %s)", (word,))
+    result = cursor.fetchone()
+    return bool(result[0])
+
+
+def insert_word(word, lemma, ipa, pos="ADJECTIVE"):  
     connect_to_database()
-    table_name = pos.lower() + "s"  # e.g., "adjectives", "nouns", etc.
+    table_name = pos.lower() + "s" 
 
-    # Create the table if it doesn't exist
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS {} (
             word VARCHAR(255) PRIMARY KEY,
@@ -245,13 +235,30 @@ def insert_word(word, lemma, ipa, pos="ADJECTIVE"):  # Default to 'ADJECTIVE'
         )
     """.format(table_name))
 
-    # Insert into the appropriate table 
     cursor.execute("""
         INSERT INTO {} (word, lemma, ipa, pos, definition) 
         VALUES (%s, %s, %s, %s, NULL)  -- Definition can be added later
     """.format(table_name), (word, lemma, ipa, pos))
 
     conn.commit()
+
+def add_other_json_files():
+    for filename in os.listdir('data/language'):
+        if filename.endswith(".json"):
+            with open(os.path.join('data/language', filename), 'r') as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON in file {filename}: {e}")
+                    continue 
+
+                for word, word_info in data.items():
+                    if not word_exists_in_database(word):
+                        lemma = word_info.get("lemma", word)
+                        ipa = get_ipa(word)
+                        insert_word(word, lemma, ipa)
+
+add_other_json_files()
 
 def get_definition_website1(word):
     try:
@@ -306,6 +313,5 @@ def add_definition(word, definition):
 
     conn.commit()
 
-# Connect to the database
 connect_to_database()
 initialize_database("language_data.sql") 
