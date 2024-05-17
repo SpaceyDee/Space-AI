@@ -12,6 +12,7 @@ from database_utils import (
   word_exists_in_database,
   create_tables,
   get_ipa,
+  insert_or_update_word
 )
 
 nlp = spacy.load("en_core_web_sm")
@@ -114,38 +115,18 @@ def create_database(data_dir, database_name="language_data.db"):
                 json.dump(data, f, indent=4)
     conn.commit()
 
-def insert_or_update_word(conn, word_data):
-    with conn.cursor() as cursor:
-        word = word_data['word']
-        part_of_speech = part_of_speech(conn, word) 
-        table_name = part_of_speech.lower() + "s"
+def get_part_of_speech(conn, word):
+    with conn.cursor() as cursor:  # Use a with block for better resource management
+        cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
+        result = cursor.fetchone()
 
-        cursor.execute(
-            f"SELECT definition FROM {table_name} WHERE word = ?", (word,)
-        )
-        existing_definition = cursor.fetchone()
-
-        if existing_definition and existing_definition[0] is not None:
-            # Word exists and has a definition, skip insertion/update
-            pass
+        if result:
+            return result[0]
         else:
-            definition = word_data.get("definition")
-            if not definition:
-                definition = get_definition_website1(word) or get_definition_website2(word)
+            doc = nlp(word)
+            return doc[0].pos_
 
-            if existing_definition:
-                cursor.execute(
-                    f"UPDATE {table_name} SET definition = ? WHERE word = ?",
-                    (definition, word),
-                )
-            else:
-                cursor.execute(
-                    f"""
-                    INSERT INTO {table_name} (word, lemma, ipa, definition)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (word, word_data.get('lemma'), get_ipa(word), definition),
-                )
+
 
 
 def add_new_words_to_database(new_words_filename="data/language/new_words.json", db_filename="language_data.db"):
