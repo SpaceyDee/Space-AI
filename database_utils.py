@@ -21,9 +21,8 @@ conn = asyncio.run(create_connection_pool())
 cursor = None
 
 async def create_tables():
-        async with conn.cursor() as cursor:
-                await cursor.executescript(
-            '''
+    async with conn.cursor() as cursor:
+        await cursor.executescript('''
             CREATE TABLE IF NOT EXISTS words (
                 word_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 word TEXT UNIQUE,
@@ -33,87 +32,31 @@ async def create_tables():
                 definition TEXT
             );
 
+            -- create parts_of_speech table 
             CREATE TABLE IF NOT EXISTS parts_of_speech(
-                pos_id INT AUTO_INCREMENT PRIMARY KEY,
+                pos_id INT PRIMARY KEY,
                 pos_type TEXT
             );
-
-            CREATE TABLE IF NOT EXISTS word_pos(
-                word_id INT,
-                pos_id INT,
-                PRIMARY KEY(word_id, pos_id),
-                FOREIGN KEY(word_id) REFERENCES words(word_id),
-                FOREIGN KEY(pos_id) REFERENCES parts_of_speech(pos_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS synonyms(
-                synonym_id INT AUTO_INCREMENT PRIMARY KEY,
-                word_id INT,
-                synonym_word_id INT,
-                FOREIGN KEY(word_id) REFERENCES words(word_id),
-                FOREIGN KEY(synonym_word_id) REFERENCES words(word_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS definitions (
-                definition_id INT AUTO_INCREMENT PRIMARY KEY,
-                word_id INT,
-                definition TEXT,
-                example_usage TEXT,
-                FOREIGN KEY(word_id) REFERENCES words(word_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS antonyms (
-                antonym_id INT AUTO_INCREMENT PRIMARY KEY,
-                word_id INT,
-                antonym_word_id INT,
-                FOREIGN KEY(word_id) REFERENCES words(word_id),
-                FOREIGN KEY(antonym_word_id) REFERENCES words(word_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS word_families (
-                family_id INT AUTO_INCREMENT PRIMARY KEY,
-                root_word TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS word_family_members (
-                word_id INT,
-                family_id INT,
-                PRIMARY KEY(word_id, family_id),
-                FOREIGN KEY(word_id) REFERENCES words(word_id),
-                FOREIGN KEY(family_id) REFERENCES word_families(family_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS origins (
-                origin_id INT AUTO_INCREMENT PRIMARY KEY,
-                language TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS word_origins (
-                word_id INT,
-                origin_id INT,
-                PRIMARY KEY(word_id, origin_id),
-                FOREIGN KEY(word_id) REFERENCES words(word_id),
-                FOREIGN KEY(origin_id) REFERENCES origins(origin_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS pronouns (
-                word_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                word TEXT UNIQUE,
-                lemma TEXT,
-                ipa TEXT,
-                definition TEXT
-                );
-            '''
-        )
+        ''')
+        parts_of_speech = ["Noun", "Pronoun", "Verb", "Adjective", "Adverb", "Preposition", "Conjunction", "Interjection"]
+        for pos in parts_of_speech:
+            await cursor.execute(
+                "INSERT OR IGNORE INTO parts_of_speech (pos_type) VALUES (?)",
+                (pos,),
+            )
 
 asyncio.run(create_tables())
 
-async def get_part_of_speech(word):
+async def get_part_of_speech(conn, word):
     async with conn.cursor() as cursor:
         await cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
         result = await cursor.fetchone()
 
-    return result[0] if result else nlp(word)[0].pos_
+    if result:
+        return result[0]
+    else:
+        doc = nlp(word)
+        return doc[0].pos_
 
 def get_new_words_from_json():
     new_words = set()
@@ -126,6 +69,7 @@ def get_new_words_from_json():
                 except json.JSONDecodeError as e:
                     print(f"Error decoding JSON in file {filename}: {e}")
                     continue
+                # Handle both dictionary and list of dictionaries format
                 if isinstance(data, list):
                     for word_dict in data:
                         all_word_data.update(word_dict)
@@ -133,24 +77,17 @@ def get_new_words_from_json():
                 else:
                     all_word_data.update(data)
                     new_words.update(data.keys())
-
-    batch_size = 100
-    processed_words = []
-    for i in range(0, len(new_words), batch_size):
-        word_batch = list(new_words)[i : i + batch_size]
-        docs = nlp.pipe(word_batch)
-        for doc in docs:
-            token = doc[0]
-            processed_words.append({
-                "word": token.text,
-                "lemma": token.lemma_,
-                "pos": token.pos_,
-                "entity_type": token.ent_type_,
-            })
-
-    for word_data in processed_words:
-        all_word_data[word_data["word"]] = word_data
-
+                # Rest of the word processing (lemmatization etc.)
+                for word in new_words:
+                    doc = nlp(word)
+                    token = doc[0]
+                    word_data = {
+                        "word": token.text,
+                        "lemma": token.lemma_,
+                        "pos": token.pos_,
+                        "entity_type": token.ent_type_,
+                    }
+                    all_word_data[word] = word_data
     return new_words, all_word_data
 
 
@@ -308,26 +245,47 @@ async def word_exists_in_database(conn, word):
         return bool(result[0])
 
 
-def insert_word(word, lemma, ipa, pos="ADJECTIVE"):
+async def insert_word_async(conn, word_data):
+    word = word_data['word']
+    lemma = word_data.get('lemma', word)  # Default to the word itself if lemma is missing
+    ipa = get_ipa(word) 
+    pos = word_data['pos']  # Retrieve POS directly from word_data
+
     table_name = pos.lower() + "s"
 
-    cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            word_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT UNIQUE,
-            lemma TEXT,
-            ipa TEXT,
-            definition TEXT
+    # Create table if it doesn't exist
+    async with conn.cursor() as cursor:  # Use async context manager
+        await cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                word_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT UNIQUE,
+                lemma TEXT,
+                ipa TEXT,
+                definition TEXT
+            )
+            """
         )
-    """)
 
-    cursor.execute(
-        f"""
-        INSERT INTO {table_name} (word, lemma, ipa, definition) 
-        VALUES (?, ?, ?, NULL)  -- Definition can be added later
-        """,
-        (word, lemma, ipa),
-    )
+        # Insert word data into words table
+        await cursor.execute(
+            """
+            INSERT INTO words (word, lemma, ipa, pos, definition)
+            VALUES (?, ?, ?, ?, NULL)  -- Definition can be added later
+            """,
+            (word, lemma, ipa, pos),
+        )
+
+        # Check if the word is already in the specific part-of-speech table
+        await cursor.execute(f"SELECT 1 FROM {table_name} WHERE word = ?", (word,))
+        if not await cursor.fetchone():  # If the word doesn't exist, insert it
+            await cursor.execute(
+                f"""
+                INSERT INTO {table_name} (word, lemma, ipa, definition) 
+                VALUES (?, ?, ?, NULL)  
+                """,
+                (word, lemma, ipa),
+            )
 
 def word_exists_in_database(conn, word): 
     cursor = conn.cursor()
@@ -390,7 +348,7 @@ async def get_definitions_concurrently(words):
             definitions[word] = def1 or def2  #
         return definitions
 
-async def process_file(filename, all_word_data, conn, words_to_insert):  # Added words_to_insert
+async def process_file(filename, all_word_data):
     tasks = []
     with open(os.path.join('data/language', filename), 'r') as f:
         data = json.load(f)
@@ -401,25 +359,38 @@ async def process_file(filename, all_word_data, conn, words_to_insert):  # Added
                     "definition": word_info.get("definition")
                 }
                 if word_data["definition"] is None:
-                    words_to_insert.append(word)  # Now it modifies the passed-in list
+                    insert_or_update_word_async.append(word)  
                 else:
                     tasks.append(
                         asyncio.create_task(insert_or_update_word_async(conn, word_data))
                     )
     await asyncio.gather(*tasks)
 
+def add_new_words_to_database(all_word_data):
+    start_time = time()
+    filename = "data/language/new_words.json"
+    with open(filename, 'r') as f:
+        new_words = json.load(f)
+
+    for word in new_words:
+        data = all_word_data.get(word)
+        insert_or_update_word(conn, data)
+        print(f"Added/updated word: {word}")
+
+    end_time = time()
+    print(f"Finished adding new words in {end_time - start_time:.2f} seconds")
 
 async def add_other_json_files(all_word_data):
     tasks = []
     words_to_insert = []
-
+    batch_size = 1000
     for filename in os.listdir('data/language'):
         if filename.endswith(".json") and filename != "new_words.json":
             tasks.append(
-                asyncio.create_task(process_file(filename, all_word_data, conn, words_to_insert))  # Pass words_to_insert
+                asyncio.create_task(process_file(filename, all_word_data, conn, words_to_insert)) 
             )
 
-    await asyncio.gather(*tasks) 
+    await asyncio.gather(*tasks)  
 
     if words_to_insert:
         definitions = await get_definitions_concurrently(words_to_insert)
@@ -434,7 +405,7 @@ async def add_other_json_files(all_word_data):
 
 async def insert_or_update_word_async(conn, word_data):
     word = word_data['word']
-    part_of_speech = get_part_of_speech(conn, word)  
+    part_of_speech = await get_part_of_speech(conn, word)
     table_name = part_of_speech.lower() + "s"
 
     async with conn.cursor() as cursor:
@@ -444,7 +415,6 @@ async def insert_or_update_word_async(conn, word_data):
         existing_definition = await cursor.fetchone()
 
         if existing_definition and existing_definition[0] is not None:
-            # Word exists and has a definition, skip insertion/update
             pass
         else:
             definition = word_data.get("definition")

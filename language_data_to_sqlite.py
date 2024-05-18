@@ -1,7 +1,6 @@
 import asyncio
 import time
 import cProfile
-import aiosqlite
 from database_utils import (
     get_new_words_from_json,
     insert_or_update_word_async,  
@@ -14,16 +13,12 @@ db_filename = "language_data.db"
 conn = asyncio.run(create_connection_pool())
 
 async def main():
-    start_time = time()
-
-    # 1. Load New Words and Existing Words:
+    start_time = time.time()
     new_words, all_word_data = get_new_words_from_json()
     existing_words = await get_existing_words_from_database(conn)
     words_to_insert = new_words - existing_words
 
-    print(f"Loaded {len(new_words)} new words from JSON in {time() - start_time:.2f} seconds")
-
-    # 2. Add New Words to the Database Concurrently:
+    print(f"Loaded {len(new_words)} new words from JSON in {time.time() - start_time:.2f} seconds")
     if words_to_insert:
         tasks = []
         for word in words_to_insert:
@@ -37,7 +32,7 @@ async def main():
     await add_other_json_files(all_word_data)
     print("All done! Database populated successfully.")
 
-    end_time = time()
+    end_time = time.time()
     print(f"Total time: {end_time - start_time:.2f} seconds")
 
 
