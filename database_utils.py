@@ -1,5 +1,6 @@
 import json
 import string
+import aiosqlite
 import requests
 import spacy
 import os
@@ -9,7 +10,6 @@ from bs4 import BeautifulSoup
 import lxml.html as lhtml
 import pyphen
 from time import time
-import aiosqlite
 
 nlp = spacy.load("en_core_web_sm")
 db_filename = "language_data.db"
@@ -18,7 +18,6 @@ async def create_connection_pool():
     return await aiosqlite.connect(db_filename)
 
 conn = asyncio.run(create_connection_pool())
-conn = None
 cursor = None
 
 async def create_tables():
@@ -109,16 +108,12 @@ async def create_tables():
 
 asyncio.run(create_tables())
 
-async def get_part_of_speech(conn, word):
+async def get_part_of_speech(word):
     async with conn.cursor() as cursor:
         await cursor.execute("SELECT pos FROM words WHERE word = ?", (word,))
         result = await cursor.fetchone()
 
-    if result:
-        return result[0]  
-    else:
-        doc = nlp(word)
-        return doc[0].pos_
+    return result[0] if result else nlp(word)[0].pos_
 
 def get_new_words_from_json():
     new_words = set()
@@ -139,13 +134,13 @@ def get_new_words_from_json():
                     all_word_data.update(data)
                     new_words.update(data.keys())
 
-    batch_size = 100  
+    batch_size = 100
     processed_words = []
     for i in range(0, len(new_words), batch_size):
         word_batch = list(new_words)[i : i + batch_size]
-        docs = nlp.pipe(word_batch)  
+        docs = nlp.pipe(word_batch)
         for doc in docs:
-            token = doc[0]  
+            token = doc[0]
             processed_words.append({
                 "word": token.text,
                 "lemma": token.lemma_,
@@ -159,7 +154,7 @@ def get_new_words_from_json():
     return new_words, all_word_data
 
 
-async def get_existing_words_from_database(conn):  
+async def get_existing_words_from_database(conn):
     async with conn.cursor() as cursor:
         await cursor.execute("SELECT word FROM words")
         results = await cursor.fetchall()
@@ -313,10 +308,10 @@ async def word_exists_in_database(conn, word):
         return bool(result[0])
 
 
-async def insert_word_async(conn, word, lemma, ipa, pos="ADJECTIVE"):  
+def insert_word(word, lemma, ipa, pos="ADJECTIVE"):
     table_name = pos.lower() + "s"
 
-    await cursor.execute(f"""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
             word_id INTEGER PRIMARY KEY AUTOINCREMENT,
             word TEXT UNIQUE,
@@ -326,25 +321,13 @@ async def insert_word_async(conn, word, lemma, ipa, pos="ADJECTIVE"):
         )
     """)
 
-    await cursor.execute(
+    cursor.execute(
         f"""
-        INSERT INTO {table_name} (word, lemma, ipa, definition)
+        INSERT INTO {table_name} (word, lemma, ipa, definition) 
         VALUES (?, ?, ?, NULL)  -- Definition can be added later
         """,
         (word, lemma, ipa),
     )
-def check_for_updates():
-    new_words, all_word_data = get_new_words_from_json()
-    existing_words = get_existing_words_from_database()
-
-    words_to_insert = new_words - existing_words  
-
-    for word in words_to_insert:
-        word_data = all_word_data[word]  
-        pos_tag = word_data.get("pos", "ADJECTIVE")  
-        insert_word(word, word_data['lemma'], get_ipa(word), pos_tag)
-
-    conn.commit()
 
 def word_exists_in_database(conn, word): 
     cursor = conn.cursor()
@@ -407,17 +390,36 @@ async def get_definitions_concurrently(words):
             definitions[word] = def1 or def2  #
         return definitions
 
+async def process_file(filename, all_word_data, conn, words_to_insert):  # Added words_to_insert
+    tasks = []
+    with open(os.path.join('data/language', filename), 'r') as f:
+        data = json.load(f)
+        for word, word_info in data.items():
+            if not await word_exists_in_database(conn, word):
+                word_data = {
+                    "word": word,
+                    "definition": word_info.get("definition")
+                }
+                if word_data["definition"] is None:
+                    words_to_insert.append(word)  # Now it modifies the passed-in list
+                else:
+                    tasks.append(
+                        asyncio.create_task(insert_or_update_word_async(conn, word_data))
+                    )
+    await asyncio.gather(*tasks)
+
+
 async def add_other_json_files(all_word_data):
     tasks = []
     words_to_insert = []
-    batch_size = 1000
+
     for filename in os.listdir('data/language'):
         if filename.endswith(".json") and filename != "new_words.json":
             tasks.append(
-                asyncio.create_task(process_file(filename, all_word_data, conn, words_to_insert)) 
+                asyncio.create_task(process_file(filename, all_word_data, conn, words_to_insert))  # Pass words_to_insert
             )
 
-    await asyncio.gather(*tasks)  
+    await asyncio.gather(*tasks) 
 
     if words_to_insert:
         definitions = await get_definitions_concurrently(words_to_insert)
@@ -430,48 +432,31 @@ async def add_other_json_files(all_word_data):
                     )
             await conn.commit()
 
-
-async def process_file(filename, all_word_data, conn, words_to_insert):  
-    tasks = []
-    with open(os.path.join('data/language', filename), 'r') as f:
-        data = json.load(f)
-        for word, word_info in data.items():
-            if not await word_exists_in_database(conn, word):
-                word_data = {
-                    "word": word,
-                    "definition": word_info.get("definition")
-                }
-                if word_data["definition"] is None:
-                    words_to_insert.append(word)  
-                else:
-                    tasks.append(
-                        asyncio.create_task(insert_or_update_word_async(conn, word_data))
-                    )
-    await asyncio.gather(*tasks)
-
 async def insert_or_update_word_async(conn, word_data):
     word = word_data['word']
     part_of_speech = get_part_of_speech(conn, word)  
     table_name = part_of_speech.lower() + "s"
 
-    await cursor.execute(
-        f"SELECT definition FROM words WHERE word = ?", (word,)
-    )
-    existing_definition = await cursor.fetchone()
+    async with conn.cursor() as cursor:
+        await cursor.execute(
+            f"SELECT definition FROM words WHERE word = ?", (word,)
+        )
+        existing_definition = await cursor.fetchone()
 
-    if existing_definition and existing_definition[0] is not None:
-        pass
-    else:
-        definition = word_data.get("definition")
+        if existing_definition and existing_definition[0] is not None:
+            # Word exists and has a definition, skip insertion/update
+            pass
+        else:
+            definition = word_data.get("definition")
 
-        await cursor.execute("SELECT 1 FROM words WHERE word = ?", (word,))
-        if await cursor.fetchone():  
-            await cursor.execute("UPDATE words SET definition = ? WHERE word = ?", (definition, word))
-        else:  
-            await cursor.execute(
-                "INSERT INTO words (word, lemma, ipa, pos, definition) VALUES (?, ?, ?, ?, ?)",
-                (word, word_data.get('lemma'), get_ipa(word), part_of_speech, definition),
-            )
+            await cursor.execute("SELECT 1 FROM words WHERE word = ?", (word,))
+            if await cursor.fetchone():  
+                await cursor.execute("UPDATE words SET definition = ? WHERE word = ?", (definition, word))
+            else:  
+                await cursor.execute(
+                    "INSERT INTO words (word, lemma, ipa, pos, definition) VALUES (?, ?, ?, ?, ?)",
+                    (word, word_data.get('lemma'), get_ipa(word), part_of_speech, definition),
+                )
 
 def get_definition_website1(word):
     try:
