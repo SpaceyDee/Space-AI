@@ -14,7 +14,7 @@ conn = asyncio.run(create_connection_pool())
 
 async def main():
     start_time = time.time()
-    new_words, all_word_data = get_new_words_from_json()
+    new_words, all_word_data = await get_new_words_from_json()
     existing_words = await get_existing_words_from_database(conn)
     words_to_insert = new_words - existing_words
 
@@ -40,3 +40,5 @@ if __name__ == "__main__":
     asyncio.run(create_tables())
 
     cProfile.run("asyncio.run(main())", sort="tottime")
+    cProfile.run("asyncio.run(add_other_json_files(all_word_data))", sort="tottime")
+    cProfile.run("add_new_words_to_database(all_word_data)", sort="tottime")
